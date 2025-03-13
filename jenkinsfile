@@ -1,0 +1,11 @@
+pipeline {
+    agent any
+
+    stages {
+        stage("first flow in jenkins") {
+            steps {
+                echo 'Jenkins is running successfully'
+            }
+        }
+    }
+}
