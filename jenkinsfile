@@ -1,29 +1,78 @@
 pipeline {
-  agent any
+    agent any
 
-  stages {
-    stage('Build') {
-      steps { sh 'go build -o main .' }
+    environment {
+        DOCKER_REGISTRY = 'your-docker-registry'  // Replace with your Docker Hub username or ECR URL
+        APP_NAME = 'session-app'
+        DOCKER_IMAGE = "${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_NUMBER}"
+        DOCKER_IMAGE_LATEST = "${DOCKER_REGISTRY}/${APP_NAME}:latest"
+        KUBECONFIG = credentials('kubeconfig')
+        AWS_DEFAULT_REGION = 'us-west-2'  // Change to your region
     }
 
-    stage('Test') {
-      steps { sh 'go test ./...' }
-    }
-
-    stage('Docker Build & Push') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-          sh '''
-          docker build -t $DOCKER_USER/session-app:latest .
-          echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-          docker push $DOCKER_USER/session-app:latest
-          '''
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
         }
-      }
+        
+        stage('Unit Tests') {
+            steps {
+                sh 'go test -v ./...'
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                sh 'go build -o main .'
+            }
+        }
+        
+        stage('Docker Build') {
+            steps {
+                sh "docker build -t ${DOCKER_IMAGE} -t ${DOCKER_IMAGE_LATEST} ."
+            }
+        }
+        
+        stage('Docker Push') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                    sh '''
+                        echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+                        docker push ${DOCKER_IMAGE}
+                        docker push ${DOCKER_IMAGE_LATEST}
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh """
+                    export KUBECONFIG=${KUBECONFIG}
+                    # Update Kubernetes manifests with the new image tag
+                    sed -i 's|${DOCKER_REGISTRY}/${APP_NAME}:.*|${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_NUMBER}|' k8s/deployment.yaml
+                    
+                    # Apply Kubernetes manifests
+                    kubectl apply -f k8s/
+                    
+                    # Wait for deployment to complete
+                    kubectl rollout status deployment/${APP_NAME}
+                """
+            }
+        }
     }
-
-    stage('Deploy to EKS') {
-      steps { sh 'kubectl apply -f k8s/' }
+    
+    post {
+        always {
+            sh 'docker rmi ${DOCKER_IMAGE} ${DOCKER_IMAGE_LATEST} || true'
+        }
+        success {
+            echo 'Build and deployment successful!'
+        }
+        failure {
+            echo 'Build or deployment failed!'
+        }
     }
-  }
 }
