@@ -1,11 +1,29 @@
 pipeline {
-    agent any
+  agent any
 
-    stages {
-        stage("first flow in jenkins") {
-            steps {
-                echo 'Jenkins is running successfully'
-            }
-        }
+  stages {
+    stage('Build') {
+      steps { sh 'go build -o main .' }
     }
+
+    stage('Test') {
+      steps { sh 'go test ./...' }
+    }
+
+    stage('Docker Build & Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+          sh '''
+          docker build -t $DOCKER_USER/session-app:latest .
+          echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+          docker push $DOCKER_USER/session-app:latest
+          '''
+        }
+      }
+    }
+
+    stage('Deploy to EKS') {
+      steps { sh 'kubectl apply -f k8s/' }
+    }
+  }
 }
