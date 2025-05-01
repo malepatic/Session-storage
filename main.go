@@ -1,60 +1,77 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"context"
-	"os"
+	"session-app/internal/api"
+	"session-app/internal/config"
+	"session-app/internal/repository"
+	"session-app/internal/service"
 
-	"github.com/go-redis/redis/v8"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
+	"github.com/gin-gonic/gin"
 )
-
-var (
-	ctx = context.Background()
-	db  *gorm.DB
-	rdb *redis.Client
-)
-
-type User struct {
-	ID       uint   `gorm:"primaryKey"`
-	Username string `gorm:"unique"`
-	Password string
-}
-
-func loginHandler(w http.ResponseWriter, r *http.Request) {
-	username := r.URL.Query().Get("user")
-	token := fmt.Sprintf("token-%s-%d", username, time.Now().Unix())
-
-	err := rdb.Set(ctx, token, username, time.Hour).Err()
-	if err != nil {
-		http.Error(w, "Redis error", http.StatusInternalServerError)
-		return
-	}
-
-	fmt.Fprintf(w, "Session Token: %s", token)
-}
 
 func main() {
-	// Connect to PostgreSQL
-	dsn := os.Getenv("DB_URL")
-	var err error
-	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	// Load configuration
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal("failed to connect to DB:", err)
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
-	db.AutoMigrate(&User{})
 
-	// Connect to Redis
-	rdb = redis.NewClient(&redis.Options{
-		Addr: os.Getenv("REDIS_URL"),
-	})
+	// Initialize Redis repository
+	redisRepo, err := repository.NewRedisRepository(cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+	defer redisRepo.Close()
 
-	http.HandleFunc("/login", loginHandler)
-	log.Println("Server started on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	// Initialize Postgres repository
+	pgRepo, err := repository.NewPostgresRepository(cfg.PostgresURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+	}
+	defer pgRepo.Close()
+
+	// Initialize services
+	authService := service.NewAuthService(pgRepo, redisRepo, cfg.TokenExpiration)
+
+	// Initialize router
+	router := gin.Default()
+	api.SetupRoutes(router, authService)
+
+	// Create HTTP server
+	srv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: router,
+	}
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("Starting server on port %s", cfg.Port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown the server
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	// The context is used to inform the server it has 5 seconds to finish
+	// the request it is currently handling
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	log.Println("Server exiting")
 }
