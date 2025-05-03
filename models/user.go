@@ -1,3 +1,1 @@
-package models
 
-func main()
